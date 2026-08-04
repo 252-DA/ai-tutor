@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ai-tutor
+      - uses: actions/checkout@v4
+        with:
+          repository: 252-DA/ai-sdk
+          ssh-key: ${{ secrets.AI_SDK_DEPLOY_KEY }}
+          path: ai-sdk
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        working-directory: ai-tutor
+        run: uv sync --frozen --python 3.10
+      - name: Run tests
+        working-directory: ai-tutor
+        run: uv run --frozen pytest -q
