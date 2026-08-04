@@ -16,10 +16,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: ai-tutor
-      - uses: actions/checkout@v4
+      - uses: 252-DA/ai-sdk/.github/actions/materialize@e4fc97d87e23b3a63eab53c489e325bdc117f923
         with:
-          repository: 252-DA/ai-sdk
-          ssh-key: ${{ secrets.AI_SDK_DEPLOY_KEY }}
           path: ai-sdk
       - uses: astral-sh/setup-uv@v5
       - name: Install dependencies
