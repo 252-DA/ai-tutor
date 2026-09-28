@@ -61,5 +61,6 @@ def test_tutor_grounds_answer_and_returns_citations():
     assert response.model == "test-model"
     assert response.citations[0].chunk_id == "chunk-1"
     assert "A tree is a connected acyclic graph." in model.prompt
+    assert "[1] (Graphs > Trees · tr. 12)\n" in model.prompt
     assert "Teach me graphs" in model.prompt
     assert context.arguments["query"] == "What is a tree?"

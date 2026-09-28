@@ -45,7 +45,12 @@ class TutorService:
             f"{item.role}: {item.content}" for item in request.history
         ) or "(none)"
         sources = "\n\n".join(
-            f"[{index}] {chunk.content}"
+            f"[{index}]"
+            + (" (" + " · ".join(filter(None, (
+                " > ".join(chunk.heading_path),
+                f"tr. {chunk.page_number}" if chunk.page_number is not None else "",
+            ))) + ")" if chunk.heading_path or chunk.page_number is not None else "")
+            + f"\n{chunk.content}"
             for index, chunk in enumerate(context.chunks, start=1)
         ) or "(no relevant course context found)"
         return (
