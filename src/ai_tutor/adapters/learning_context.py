@@ -1,22 +1,13 @@
-from ai_runtime.mcp import LearningContextClient, QuizContext
+from typing import Any
+
+from ai_runtime.mcp import MCPToolClient
 
 
-class MCPLearningContext:
-    def __init__(self, client: LearningContextClient) -> None:
+class MCPCourseTools:
+    """Gọi công cụ của mcp-service. Một lỗi công cụ ném ra MCPToolError cho vòng lặp xử lý."""
+
+    def __init__(self, client: MCPToolClient) -> None:
         self._client = client
 
-    def retrieve(
-        self,
-        *,
-        course_id: str,
-        lo_code: str,
-        query: str,
-        top_k: int,
-    ) -> QuizContext:
-        return self._client.retrieve_quiz_context(
-            course_id=course_id,
-            lo_code=lo_code,
-            query=query,
-            assessment_style="tutor",
-            top_k=top_k,
-        )
+    def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._client.call_tool(name, arguments)

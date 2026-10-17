@@ -1,6 +1,12 @@
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Any, Protocol
 
-from ai_runtime.mcp import QuizContext
+
+@dataclass(frozen=True)
+class ModelReply:
+    text: str
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class TutorModel(Protocol):
@@ -8,17 +14,12 @@ class TutorModel(Protocol):
     def model_id(self) -> str:
         ...
 
-    def answer(self, prompt: str, system: str) -> str:
+    def generate(self, prompt: str, system: str) -> ModelReply:
         ...
 
 
-class LearningContext(Protocol):
-    def retrieve(
-        self,
-        *,
-        course_id: str,
-        lo_code: str,
-        query: str,
-        top_k: int,
-    ) -> QuizContext:
+class CourseTools(Protocol):
+    """Công cụ tra cứu khóa học (MCP). Tên là tên công cụ MCP, tham số đã được kiểm."""
+
+    def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         ...

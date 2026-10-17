@@ -1,0 +1,269 @@
+"""Ba chế độ truy xuất với mô hình và công cụ giả: không mạng, không LLM thật."""
+import json
+from typing import Any
+
+import pytest
+from ai_runtime.errors import MCPToolError
+
+from ai_tutor.agent import parse_action
+from ai_tutor.models import TutorRequest
+from ai_tutor.ports import ModelReply
+from ai_tutor.service import TutorService
+
+COURSE = "co3137-uuid"
+
+
+class FakeModel:
+    """Trả lần lượt các câu đã định; ghi lại prompt và system của từng lần gọi."""
+
+    model_id = "fake-model"
+
+    def __init__(self, *replies: str) -> None:
+        self._replies = list(replies)
+        self.prompts: list[str] = []
+        self.systems: list[str] = []
+
+    def generate(self, prompt: str, system: str) -> ModelReply:
+        self.prompts.append(prompt)
+        self.systems.append(system)
+        return ModelReply(text=self._replies.pop(0), input_tokens=100, output_tokens=20)
+
+
+class FakeTools:
+    def __init__(self, results: dict[str, Any] | None = None) -> None:
+        self.results = results or {}
+        self.calls: list[tuple[str, dict]] = []
+
+    def call(self, name: str, arguments: dict) -> dict:
+        self.calls.append((name, arguments))
+        result = self.results.get(name)
+        if isinstance(result, Exception):
+            raise result
+        return result if result is not None else {}
+
+
+def chunk(i: int, text: str, page: int = 5, heading=("Chương 5", "Deadlock")) -> dict:
+    return {
+        "chunk_id": f"c{i}", "document_id": "d1", "document_name": "Ch5.pdf",
+        "heading_path": list(heading), "content": text, "page_number": page, "score": 0.9, "rank": i,
+    }
+
+
+def tool(name: str, **args) -> str:
+    return json.dumps({"action": "tool", "tool": name, "args": args}, ensure_ascii=False)
+
+
+def answer(text: str) -> str:
+    return json.dumps({"action": "answer", "answer": text}, ensure_ascii=False)
+
+
+def ask(service, message="Deadlock là gì?", **kw):
+    return service.answer(TutorRequest(course_id=COURSE, message=message, **kw))
+
+
+SEARCH = {"search_course_chunks": {"results": [chunk(1, "Deadlock là trạng thái các tiến trình chờ nhau."), chunk(2, "Bốn điều kiện cần.", page=6)]}}
+
+
+# ----------------------------------------------------------------- vector
+
+def test_vector_mode_searches_once_and_answers_once():
+    model, tools = FakeModel("Deadlock là chờ vòng tròn [1]. Cần bốn điều kiện [2]."), FakeTools(SEARCH)
+    response = ask(TutorService(model, tools))
+
+    assert tools.calls == [("search_course_chunks", {"course_id": COURSE, "query": "Deadlock là gì?", "top_k": 6})]
+    assert response.trace.mode == "vector"
+    assert (response.trace.steps, response.trace.llm_calls, response.trace.retrieved) == (1, 1, 2)
+    assert (response.trace.input_tokens, response.trace.output_tokens) == (100, 20)
+    assert [c.index for c in response.citations] == [1, 2]
+    assert response.citations[1].page_number == 6
+    assert "Ch5.pdf · Chương 5 > Deadlock · tr. 5" in model.prompts[0]
+
+
+def test_vector_mode_filters_by_open_document():
+    tools = FakeTools(SEARCH)
+    ask(TutorService(FakeModel("ok"), tools), document_id="d1", page_number=5)
+    assert tools.calls[0][1]["document_ids"] == ["d1"]
+
+
+def test_vector_mode_citation_markers_not_in_the_book_are_ignored():
+    response = ask(TutorService(FakeModel("Theo [1] và [9]."), FakeTools(SEARCH)))
+    assert [c.index for c in response.citations] == [1]
+
+
+def test_vector_mode_with_no_results_still_answers():
+    response = ask(TutorService(FakeModel("Tài liệu không nói về điều này."), FakeTools({"search_course_chunks": {"results": []}})))
+    assert response.citations == [] and response.trace.retrieved == 0
+
+
+# ----------------------------------------------------------------- tools
+
+def test_tool_loop_searches_then_answers_with_evidence_numbers():
+    model = FakeModel(tool("search_chunks", query="deadlock"), answer("Deadlock là … [1]."))
+    tools = FakeTools(SEARCH)
+    response = ask(TutorService(model, tools), mode="tools")
+
+    assert tools.calls[0][0] == "search_course_chunks"
+    assert tools.calls[0][1]["query"] == "deadlock"
+    assert response.answer == "Deadlock là … [1]."
+    assert response.trace.llm_calls == 2
+    assert [t.tool for t in response.trace.tool_calls] == ["search_chunks"]
+    assert response.trace.tool_calls[0].found == 2
+    assert response.citations[0].chunk_id == "c1"
+    # Quan sát của bước 1 được đưa lại cho mô hình ở bước 2.
+    assert "[1] (Ch5.pdf" in model.prompts[1]
+
+
+def test_model_cannot_override_the_course():
+    model = FakeModel(tool("search_chunks", query="x", course_id="another-course"), answer("ok"))
+    tools = FakeTools(SEARCH)
+    ask(TutorService(model, tools), mode="tools")
+    assert tools.calls[0][1]["course_id"] == COURSE
+
+
+def test_page_lookup_by_evidence_number_uses_that_chunks_page():
+    model = FakeModel(tool("search_chunks", query="x"), tool("get_page", evidence=2), answer("Xong [1]."))
+    tools = FakeTools({**SEARCH, "get_document_page": {"chunks": [chunk(3, "Cả trang 6.", page=6)]}})
+    response = ask(TutorService(model, tools), mode="tools")
+    assert tools.calls[1] == ("get_document_page", {"document_id": "d1", "page": 6})
+    assert response.trace.tool_calls[1].found == 1
+
+
+def test_neighbors_use_the_chunk_behind_the_evidence_number():
+    model = FakeModel(tool("search_chunks", query="x"), tool("get_neighbors", evidence=1, window=2), answer("ok"))
+    tools = FakeTools({**SEARCH, "get_neighbor_chunks": {"chunks": [chunk(3, "Đoạn kế.")]}})
+    ask(TutorService(model, tools), mode="tools")
+    assert tools.calls[1] == ("get_neighbor_chunks", {"chunk_id": "c1", "window": 2})
+
+
+def test_outline_observation_lists_chapters_and_los():
+    outline = {"course": {"code": "CO3137", "title": "Dữ liệu lớn"},
+               "chapters": [{"code": "5", "title": "Streaming", "topics": "Kafka", "los": ["L.O.2.2"]}],
+               "learning_outcomes": [{"code": "L.O.2.2", "statement": "So sánh", "bloom_level": "analyze"}],
+               "assessments": []}
+    model = FakeModel(tool("get_outline"), answer("Chương 5 học Streaming."))
+    tools = FakeTools({"get_course_outline": outline})
+    ask(TutorService(model, tools), mode="tools")
+    assert "Chapter 5: Streaming — Kafka (LO: L.O.2.2)" in model.prompts[1]
+
+
+def test_unknown_tool_and_bad_args_are_reported_back_not_raised():
+    model = FakeModel(
+        tool("drop_database"),
+        tool("get_page", evidence=7),
+        tool("search_chunks"),
+        answer("Không tìm được."),
+    )
+    tools = FakeTools(SEARCH)
+    response = ask(TutorService(model, tools), mode="tools")
+    assert tools.calls == []                      # không lời gọi nào tới MCP
+    assert [t.ok for t in response.trace.tool_calls] == [False, False, False]
+    assert "unknown tool" in model.prompts[1]
+    assert "there is no evidence [7]" in model.prompts[2]
+    assert "'query' is required" in model.prompts[3]
+
+
+def test_repeating_the_same_call_is_refused():
+    model = FakeModel(tool("search_chunks", query="x"), tool("search_chunks", query="x"), answer("ok"))
+    tools = FakeTools(SEARCH)
+    response = ask(TutorService(model, tools), mode="tools")
+    assert len(tools.calls) == 1
+    assert response.trace.tool_calls[1].error == "repeated call"
+
+
+def test_a_tool_failure_becomes_an_observation():
+    model = FakeModel(tool("search_chunks", query="x"), answer("Không tra được."))
+    tools = FakeTools({"search_course_chunks": MCPToolError("mcp down")})
+    response = ask(TutorService(model, tools), mode="tools")
+    assert response.trace.tool_calls[0].ok is False
+    assert "mcp down" in model.prompts[1]
+    assert response.answer == "Không tra được."
+
+
+def test_running_out_of_calls_forces_an_answer():
+    tools = FakeTools(SEARCH)
+    model = FakeModel(
+        tool("search_chunks", query="a"), tool("search_chunks", query="b"),
+        answer("Đành trả lời với những gì có [1]."),   # lượt bị ép, sau khi hết 2 lời gọi
+    )
+    response = ask(TutorService(model, tools, max_tool_calls_tools=2), mode="tools")
+    assert len(response.trace.tool_calls) == 2
+    assert response.trace.forced_answer is True
+    assert "no tool calls left" in model.prompts[2].lower()
+    assert response.answer.startswith("Đành trả lời")
+
+
+def test_a_model_that_keeps_asking_for_tools_still_ends():
+    model = FakeModel(tool("search_chunks", query="a"), tool("search_chunks", query="b"),
+                      tool("search_chunks", query="c"), "câu trả lời bằng chữ thường")
+    response = ask(TutorService(model, FakeTools(SEARCH), max_tool_calls_tools=2), mode="tools")
+    assert response.trace.forced_answer is True
+    assert response.answer == "câu trả lời bằng chữ thường"
+
+
+def test_invalid_json_is_retried_then_used_as_the_answer():
+    model = FakeModel("không phải json", "vẫn không phải json", "lần ba cũng không")
+    response = ask(TutorService(model, FakeTools()), mode="tools")
+    assert response.answer == "lần ba cũng không"
+    assert response.trace.llm_calls == 3
+    assert "not a single valid JSON" in model.prompts[1]
+
+
+def test_json_in_a_code_fence_is_accepted():
+    fenced = "```json\n" + answer("Đáp án") + "\n```"
+    assert ask(TutorService(FakeModel(fenced), FakeTools()), mode="tools").answer == "Đáp án"
+
+
+def test_open_page_is_told_to_the_model_in_tool_modes():
+    model = FakeModel(answer("ok"))
+    ask(TutorService(model, FakeTools()), mode="tools", document_id="d1", page_number=7)
+    assert "document d1 open, page 7" in model.prompts[0]
+
+
+# ----------------------------------------------------------------- graph
+
+RELATIONS = {"get_concept_relations": {"relations": [
+    {"source": "Hold and wait", "relation": "cause", "target": "Deadlock",
+     "evidence_quote": "giữ và chờ gây ra deadlock", "chunk_id": "c9", "document_id": "d1", "page_number": 8, "hop": 1},
+]}}
+
+
+def test_graph_mode_offers_relations_and_cites_the_quote():
+    model = FakeModel(tool("get_relations", concept="deadlock", hops=2), answer("Giữ và chờ gây deadlock [1]."))
+    tools = FakeTools(RELATIONS)
+    response = ask(TutorService(model, tools), mode="graph")
+
+    assert "get_relations" in model.systems[0]
+    assert tools.calls[0] == ("get_concept_relations", {"course_id": COURSE, "concept": "deadlock", "hops": 2, "limit": 15})
+    assert "[1] Hold and wait --cause--> Deadlock" in model.prompts[1]
+    assert response.citations[0].chunk_id == "c9"
+    assert response.citations[0].quote == "giữ và chờ gây ra deadlock"
+    assert response.citations[0].page_number == 8
+
+
+def test_tools_mode_does_not_offer_or_allow_relations():
+    model = FakeModel(tool("get_relations", concept="deadlock"), answer("ok"))
+    tools = FakeTools(RELATIONS)
+    response = ask(TutorService(model, tools), mode="tools")
+    assert "get_relations" not in model.systems[0]
+    assert tools.calls == []
+    assert response.trace.tool_calls[0].ok is False
+
+
+def test_call_budget_differs_by_mode():
+    tools_model, graph_model = FakeModel(answer("a")), FakeModel(answer("b"))
+    ask(TutorService(tools_model, FakeTools()), mode="tools")
+    ask(TutorService(graph_model, FakeTools()), mode="graph")
+    assert "at most 5 tool calls" in tools_model.systems[0]
+    assert "at most 6 tool calls" in graph_model.systems[0]
+
+
+# ----------------------------------------------------------------- parse_action
+
+@pytest.mark.parametrize("text,expected", [
+    ('{"action": "answer", "answer": "x"}', {"action": "answer", "answer": "x"}),
+    ('Sure! {"action": "tool", "tool": "get_outline", "args": {}} thanks', {"action": "tool", "tool": "get_outline", "args": {}}),
+    ("no json here", None),
+    ("[1, 2, 3]", None),
+])
+def test_parse_action(text, expected):
+    assert parse_action(text) == expected
