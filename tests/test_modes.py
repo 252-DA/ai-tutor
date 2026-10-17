@@ -80,13 +80,26 @@ def test_vector_mode_searches_once_and_answers_once():
 
 
 def test_vector_mode_filters_by_open_document():
+    model = FakeModel("ok")
     tools = FakeTools(SEARCH)
-    ask(TutorService(FakeModel("ok"), tools), document_id="d1", page_number=5)
+    ask(TutorService(model, tools), document_id="d1", page_number=5, lo_code="L.O.1.2")
     assert tools.calls[0][1]["document_ids"] == ["d1"]
+    assert "document d1 open, page 5" in model.prompts[0]
+    assert "Current learning outcome focus: L.O.1.2." in model.prompts[0]
 
 
 def test_vector_mode_citation_markers_not_in_the_book_are_ignored():
     response = ask(TutorService(FakeModel("Theo [1] và [9]."), FakeTools(SEARCH)))
+    assert [c.index for c in response.citations] == [1]
+
+
+def test_citation_parser_ignores_array_indexing_and_code_blocks():
+    reply = (
+        "Ta truy cập phần tử bằng `arr[1]` hoặc viết a[2] trong câu, và khối:\n"
+        "```python\nx = [1, 2]\n```\n"
+        "Nhưng khẳng định thực tế thì trích [1]."
+    )
+    response = ask(TutorService(FakeModel(reply), FakeTools(SEARCH)))
     assert [c.index for c in response.citations] == [1]
 
 
@@ -114,17 +127,22 @@ def test_tool_loop_searches_then_answers_with_evidence_numbers():
 
 
 def test_model_cannot_override_the_course():
-    model = FakeModel(tool("search_chunks", query="x", course_id="another-course"), answer("ok"))
-    tools = FakeTools(SEARCH)
+    model = FakeModel(
+        tool("search_chunks", query="x", course_id="another-course"),
+        tool("get_page", document_id="d1", page=3, course_id="another-course"),
+        answer("ok"),
+    )
+    tools = FakeTools({**SEARCH, "get_document_page": {"chunks": [chunk(3, "Trang 3.", page=3)]}})
     ask(TutorService(model, tools), mode="tools")
     assert tools.calls[0][1]["course_id"] == COURSE
+    assert tools.calls[1] == ("get_document_page", {"course_id": COURSE, "document_id": "d1", "page": 3})
 
 
 def test_page_lookup_by_evidence_number_uses_that_chunks_page():
     model = FakeModel(tool("search_chunks", query="x"), tool("get_page", evidence=2), answer("Xong [1]."))
     tools = FakeTools({**SEARCH, "get_document_page": {"chunks": [chunk(3, "Cả trang 6.", page=6)]}})
     response = ask(TutorService(model, tools), mode="tools")
-    assert tools.calls[1] == ("get_document_page", {"document_id": "d1", "page": 6})
+    assert tools.calls[1] == ("get_document_page", {"course_id": COURSE, "document_id": "d1", "page": 6})
     assert response.trace.tool_calls[1].found == 1
 
 
@@ -209,8 +227,18 @@ def test_invalid_json_is_retried_then_used_as_the_answer():
 
 
 def test_json_in_a_code_fence_is_accepted():
-    fenced = "```json\n" + answer("Đáp án") + "\n```"
-    assert ask(TutorService(FakeModel(fenced), FakeTools()), mode="tools").answer == "Đáp án"
+    fenced_tool = "```json\n" + tool("search_chunks", query="deadlock") + "\n```"
+    fenced_answer = "```json\n" + answer("Đáp án [1]") + "\n```"
+    assert ask(TutorService(FakeModel(fenced_tool, fenced_answer), FakeTools(SEARCH)), mode="tools").answer == "Đáp án [1]"
+
+
+def test_answer_without_any_tool_call_prompts_the_model_to_search_first():
+    model = FakeModel(answer("Tự trả lời không tra cứu"), tool("search_chunks", query="deadlock"), answer("Deadlock là … [1]."))
+    tools = FakeTools(SEARCH)
+    response = ask(TutorService(model, tools), mode="tools")
+    assert "not called any tool yet" in model.prompts[1]
+    assert len(tools.calls) == 1
+    assert response.answer == "Deadlock là … [1]."
 
 
 def test_tool_name_in_action_with_a_premature_answer_runs_the_tool_first():
@@ -226,9 +254,10 @@ def test_tool_name_in_action_with_a_premature_answer_runs_the_tool_first():
 
 
 def test_open_page_is_told_to_the_model_in_tool_modes():
-    model = FakeModel(answer("ok"))
-    ask(TutorService(model, FakeTools()), mode="tools", document_id="d1", page_number=7)
+    model = FakeModel(tool("get_page", document_id="d1", page=7), answer("ok"))
+    ask(TutorService(model, FakeTools()), mode="tools", document_id="d1", page_number=7, lo_code="L.O.2.1")
     assert "document d1 open, page 7" in model.prompts[0]
+    assert "Current learning outcome focus: L.O.2.1." in model.prompts[0]
 
 
 # ----------------------------------------------------------------- graph
@@ -262,9 +291,10 @@ def test_tools_mode_does_not_offer_or_allow_relations():
 
 
 def test_call_budget_differs_by_mode():
-    tools_model, graph_model = FakeModel(answer("a")), FakeModel(answer("b"))
-    ask(TutorService(tools_model, FakeTools()), mode="tools")
-    ask(TutorService(graph_model, FakeTools()), mode="graph")
+    tools_model = FakeModel(tool("search_chunks", query="a"), answer("a"))
+    graph_model = FakeModel(tool("search_chunks", query="b"), answer("b"))
+    ask(TutorService(tools_model, FakeTools(SEARCH)), mode="tools")
+    ask(TutorService(graph_model, FakeTools(SEARCH)), mode="graph")
     assert "at most 5 tool calls" in tools_model.systems[0]
     assert "at most 6 tool calls" in graph_model.systems[0]
 

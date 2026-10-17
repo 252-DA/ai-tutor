@@ -126,8 +126,13 @@ def build_mcp_call(
                 raise ToolArgumentError(f"there is no evidence [{evidence}]")
             if item.page_number is None:
                 raise ToolArgumentError(f"evidence [{evidence}] has no page number")
-            return {"document_id": item.document_id, "page": item.page_number}
+            return {
+                "course_id": course_id,
+                "document_id": item.document_id,
+                "page": item.page_number,
+            }
         return {
+            "course_id": course_id,
             "document_id": _text(raw, "document_id", required=True, limit=100),
             "page": _int(raw, "page", default=None, low=1, high=9999)
             or _fail("'page' is required"),

@@ -123,6 +123,13 @@ def run_tool_loop(
         action = _normalize(action)
         kind = str(action.get("action", "")).lower()
         if kind == "answer" or (kind == "" and "answer" in action):
+            if not trace.tool_calls and not out_of_calls and format_retries < MAX_FORMAT_RETRIES:
+                format_retries += 1
+                scratchpad.append(
+                    "(You have not called any tool yet. Call a tool such as search_chunks "
+                    "or get_outline to check the course material before answering.)"
+                )
+                continue
             return AgentResult(answer=str(action.get("answer", "")).strip(), forced=out_of_calls)
 
         if kind != "tool":

@@ -50,6 +50,7 @@ Tools:
 {tools}
 
 How to work:
+- Always call at least one tool before answering, even when you think the question is outside the course.
 - Start with search_chunks for content questions. Use get_page when the learner names a page or has one open, get_outline for "which chapter/LO/what is assessed" questions, get_neighbors when a chunk is cut off{graph_hint}.
 - Evidence from tools is numbered [1], [2], ... Cite those numbers in the final answer. This numbering and the
   word "evidence" are for you only; the learner just sees the markers.
@@ -85,16 +86,20 @@ def _history(request: TutorRequest, limit_chars: int = 2000) -> str:
 
 
 def _open_context(request: TutorRequest) -> str:
-    if not request.document_id:
-        return ""
-    page = f", page {request.page_number}" if request.page_number else ""
-    return f"The learner currently has document {request.document_id} open{page}.\n"
+    lines: list[str] = []
+    if request.document_id:
+        page = f", page {request.page_number}" if request.page_number else ""
+        lines.append(f"The learner currently has document {request.document_id} open{page}.")
+    if request.lo_code:
+        lines.append(f"Current learning outcome focus: {request.lo_code}.")
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 def vector_prompt(request: TutorRequest, book: EvidenceBook) -> str:
     evidence = "\n\n".join(chunk_line(item) for item in book.items()) or "(no relevant course material found)"
     return (
         f"Recent conversation:\n{_history(request)}\n\n"
+        f"{_open_context(request)}"
         f"Course material (numbered, for you to cite):\n{evidence}\n\n"
         f"Learner question: {request.message}"
     )

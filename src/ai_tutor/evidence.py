@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 
 from ai_tutor.models import TutorCitation
 
-_MARKER = re.compile(r"\[(\d{1,3}(?:\s*[,;]\s*\d{1,3})*)\]")
+_CODE_SPAN = re.compile(r"```.*?```|`[^`\n]+`", flags=re.DOTALL)
+_MARKER = re.compile(r"(?<![A-Za-z0-9_])\[(\d{1,3}(?:\s*[,;]\s*\d{1,3})*)\]")
 
 
 @dataclass
@@ -78,7 +79,8 @@ class EvidenceBook:
     def cited_indexes(self, answer: str) -> list[int]:
         """Các số [n] có thật trong sổ, theo thứ tự xuất hiện đầu tiên."""
         seen: list[int] = []
-        for match in _MARKER.finditer(answer or ""):
+        prose = _CODE_SPAN.sub(" ", answer or "")
+        for match in _MARKER.finditer(prose):
             for raw in re.split(r"[,;]", match.group(1)):
                 n = int(raw)
                 if self.get(n) is not None and n not in seen:
