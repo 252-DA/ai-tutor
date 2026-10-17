@@ -213,6 +213,18 @@ def test_json_in_a_code_fence_is_accepted():
     assert ask(TutorService(FakeModel(fenced), FakeTools()), mode="tools").answer == "Đáp án"
 
 
+def test_tool_name_in_action_with_a_premature_answer_runs_the_tool_first():
+    # Lỗi thật của deepseek-chat: tên công cụ nằm ở "action", tham số phẳng, rồi tự viết luôn câu trả lời.
+    premature = '{"action": "search_chunks", "query": "deadlock", "document_id": ""}\n\n' + answer("bịa")
+    model = FakeModel(premature, answer("Deadlock là … [1]."))
+    tools = FakeTools(SEARCH)
+    response = ask(TutorService(model, tools), mode="tools")
+
+    assert tools.calls[0] == ("search_course_chunks", {"course_id": COURSE, "query": "deadlock", "top_k": 6})
+    assert response.answer == "Deadlock là … [1]."
+    assert response.citations[0].chunk_id == "c1"
+
+
 def test_open_page_is_told_to_the_model_in_tool_modes():
     model = FakeModel(answer("ok"))
     ask(TutorService(model, FakeTools()), mode="tools", document_id="d1", page_number=7)
@@ -262,6 +274,9 @@ def test_call_budget_differs_by_mode():
 @pytest.mark.parametrize("text,expected", [
     ('{"action": "answer", "answer": "x"}', {"action": "answer", "answer": "x"}),
     ('Sure! {"action": "tool", "tool": "get_outline", "args": {}} thanks', {"action": "tool", "tool": "get_outline", "args": {}}),
+    ('{"action": "tool", "tool": "get_outline", "args": {}}\n{"action": "answer", "answer": "x"}',
+     {"action": "tool", "tool": "get_outline", "args": {}}),
+    ('{broken {"action": "answer", "answer": "x"}', {"action": "answer", "answer": "x"}),
     ("no json here", None),
     ("[1, 2, 3]", None),
 ])

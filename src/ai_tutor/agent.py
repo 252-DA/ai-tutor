@@ -38,21 +38,39 @@ class AgentResult:
 
 
 def parse_action(text: str) -> dict[str, Any] | None:
-    """Lấy object JSON đầu tiên trong câu trả lời (bỏ rào ```json nếu có)."""
+    """
+    Lấy object JSON đầu tiên trong câu trả lời (bỏ rào ```json nếu có).
+
+    Mô hình đôi khi viết hai object liền nhau trong một lượt (gọi công cụ rồi tự trả lời luôn,
+    khi chưa thấy kết quả); chỉ object đầu tiên được tính, phần sau bỏ.
+    """
     raw = (text or "").strip()
     fenced = re.search(r"```(?:json)?\s*(.*?)```", raw, flags=re.DOTALL)
     if fenced:
         raw = fenced.group(1).strip()
-    for candidate in (raw, raw[raw.find("{") : raw.rfind("}") + 1] if "{" in raw else ""):
-        if not candidate:
-            continue
+    decoder = json.JSONDecoder()
+    start = raw.find("{")
+    while start != -1:
         try:
-            value = json.loads(candidate)
+            value, _ = decoder.raw_decode(raw, start)
         except json.JSONDecodeError:
+            start = raw.find("{", start + 1)
             continue
         if isinstance(value, dict):
             return value
+        start = raw.find("{", start + 1)
     return None
+
+
+def _normalize(action: dict[str, Any]) -> dict[str, Any]:
+    """{"action": "search_chunks", "query": ...}: tên công cụ đặt nhầm vào "action", tham số để phẳng."""
+    name = str(action.get("action", "")).strip()
+    if name not in TOOLS:
+        return action
+    args = action.get("args")
+    if not isinstance(args, dict):
+        args = {k: v for k, v in action.items() if k not in ("action", "tool")}
+    return {"action": "tool", "tool": name, "args": args}
 
 
 def _call_key(tool: str, args: dict[str, Any]) -> str:
@@ -102,6 +120,7 @@ def run_tool_loop(
             )
             continue
 
+        action = _normalize(action)
         kind = str(action.get("action", "")).lower()
         if kind == "answer" or (kind == "" and "answer" in action):
             return AgentResult(answer=str(action.get("answer", "")).strip(), forced=out_of_calls)
