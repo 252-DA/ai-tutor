@@ -1,7 +1,9 @@
 import time
+from collections.abc import Iterator
+from typing import Any
 
 from ai_tutor import prompts
-from ai_tutor.agent import run_tool_loop
+from ai_tutor.agent import AgentResult, iter_tool_loop, run_tool_loop
 from ai_tutor.evidence import EvidenceBook
 from ai_tutor.models import ToolCallTrace, TutorRequest, TutorResponse, TutorTrace
 from ai_tutor.ports import CourseTools, TutorModel
@@ -55,6 +57,58 @@ class TutorService:
             citations=book.citations(answer),
             trace=trace,
         )
+
+    def stream(self, request: TutorRequest) -> Iterator[dict[str, Any]]:
+        started = time.monotonic()
+        book = EvidenceBook()
+        trace = TutorTrace(mode=request.mode)
+        answer = ""
+
+        if request.mode == "vector":
+            yield {"event": "step", "phase": "searching", "tool": "search_chunks"}
+            arguments = {"course_id": request.course_id, "query": request.message, "top_k": request.top_k}
+            if request.document_id:
+                arguments["document_ids"] = [request.document_id]
+            call_started = time.monotonic()
+            result = self._tools.call("search_course_chunks", arguments)
+            items = add_chunks(book, result.get("results") or [], name_key="document_name")
+            trace.tool_calls.append(_trace_call("search_chunks", arguments, len(items), call_started))
+            if len(book) > 0:
+                yield {
+                    "event": "evidence",
+                    "citations": [c.model_dump() for c in book.all_citations()],
+                }
+            yield {"event": "step", "phase": "answering"}
+            reply = self._model.generate(prompts.vector_prompt(request, book), prompts.SYSTEM_VECTOR)
+            trace.steps = 1
+            trace.llm_calls = 1
+            trace.input_tokens = reply.input_tokens
+            trace.output_tokens = reply.output_tokens
+            answer = reply.text.strip()
+        else:
+            yield {"event": "step", "phase": "searching"}
+            for item in iter_tool_loop(
+                request=request,
+                model=self._model,
+                tools=self._tools,
+                book=book,
+                trace=trace,
+                max_tool_calls=self._max_calls[request.mode],
+            ):
+                if isinstance(item, AgentResult):
+                    answer, trace.forced_answer = item.answer, item.forced
+                else:
+                    yield item
+
+        trace.retrieved = len(book)
+        trace.latency_ms = int((time.monotonic() - started) * 1000)
+        response = TutorResponse(
+            answer=answer,
+            model=self._model.model_id,
+            citations=book.citations(answer),
+            trace=trace,
+        )
+        yield {"event": "done", "response": response.model_dump()}
 
     def _answer_vector(self, request: TutorRequest, book: EvidenceBook, trace: TutorTrace) -> str:
         arguments = {"course_id": request.course_id, "query": request.message, "top_k": request.top_k}

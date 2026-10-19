@@ -15,6 +15,14 @@ class _Tutor:
             answer=f"Answer: {request.message}", model="fake", trace=TutorTrace(mode=request.mode)
         )
 
+    def stream(self, request):
+        self.request = request
+        yield {"event": "step", "phase": "searching"}
+        resp = TutorResponse(
+            answer=f"Answer: {request.message}", model="fake", trace=TutorTrace(mode=request.mode)
+        )
+        yield {"event": "done", "response": resp.model_dump()}
+
 
 def _post(tutor, body):
     app.dependency_overrides[get_tutor_service] = lambda: tutor
@@ -51,3 +59,17 @@ def test_mode_and_open_page_reach_the_service():
 
 def test_unknown_mode_is_rejected():
     assert _post(_Tutor(), {"course_id": "CS101", "message": "q", "mode": "agent"}).status_code == 422
+
+
+def test_stream_endpoint_emits_sse_frames():
+    tutor = _Tutor()
+    app.dependency_overrides[get_tutor_service] = lambda: tutor
+    try:
+        response = TestClient(app).post("/v1/tutor/messages/stream", json={"course_id": "CS101", "message": "hi"})
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: step" in response.text
+    assert "event: done" in response.text
+

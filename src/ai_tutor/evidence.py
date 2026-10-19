@@ -14,6 +14,26 @@ _CODE_SPAN = re.compile(r"```.*?```|`[^`\n]+`", flags=re.DOTALL)
 _MARKER = re.compile(r"(?<![A-Za-z0-9_])\[(\d{1,3}(?:\s*[,;]\s*\d{1,3})*)\]")
 
 
+def _strip_prose_markers(segment: str) -> str:
+    cleaned = _MARKER.sub("", segment)
+    cleaned = re.sub(r" +([.,;:!?])", r"\1", cleaned)
+    return re.sub(r" {2,}", " ", cleaned)
+
+
+def strip_citation_markers(text: str) -> str:
+    """Bỏ các ký hiệu trích dẫn [n] ngoài vùng code để đưa câu trả lời cũ vào lịch sử."""
+    if not text:
+        return ""
+    parts: list[str] = []
+    last = 0
+    for match in _CODE_SPAN.finditer(text):
+        parts.append(_strip_prose_markers(text[last : match.start()]))
+        parts.append(match.group(0))
+        last = match.end()
+    parts.append(_strip_prose_markers(text[last:]))
+    return "".join(parts).strip()
+
+
 @dataclass
 class EvidenceItem:
     index: int
@@ -24,6 +44,16 @@ class EvidenceItem:
     text: str
     quote: str | None = None
     document_name: str | None = None
+
+    def to_citation(self) -> TutorCitation:
+        return TutorCitation(
+            index=self.index,
+            chunk_id=self.chunk_id,
+            document_id=self.document_id,
+            heading_path=self.heading_path,
+            page_number=self.page_number,
+            quote=self.quote,
+        )
 
 
 @dataclass
@@ -87,18 +117,9 @@ class EvidenceBook:
                     seen.append(n)
         return seen
 
+    def all_citations(self) -> list[TutorCitation]:
+        return [item.to_citation() for item in self._items]
+
     def citations(self, answer: str) -> list[TutorCitation]:
-        out = []
-        for n in self.cited_indexes(answer):
-            item = self._items[n - 1]
-            out.append(
-                TutorCitation(
-                    index=item.index,
-                    chunk_id=item.chunk_id,
-                    document_id=item.document_id,
-                    heading_path=item.heading_path,
-                    page_number=item.page_number,
-                    quote=item.quote,
-                )
-            )
-        return out
+        return [self._items[n - 1].to_citation() for n in self.cited_indexes(answer)]
+

@@ -1,7 +1,7 @@
 """Prompt của chatbot. Ba chế độ dùng chung quy tắc trả lời; chỉ khác cách có bằng chứng."""
 from __future__ import annotations
 
-from ai_tutor.evidence import EvidenceBook
+from ai_tutor.evidence import EvidenceBook, strip_citation_markers
 from ai_tutor.models import TutorRequest
 from ai_tutor.tools import TOOLS, chunk_line, toolset_for
 
@@ -81,7 +81,10 @@ def tool_system_prompt(mode: str, max_tool_calls: int) -> str:
 
 
 def _history(request: TutorRequest, limit_chars: int = 2000) -> str:
-    lines = [f"{m.role}: {m.content[:limit_chars]}" for m in request.history]
+    lines: list[str] = []
+    for m in request.history:
+        content = strip_citation_markers(m.content) if m.role == "assistant" else m.content
+        lines.append(f"{m.role}: {content[:limit_chars]}")
     return "\n".join(lines) or "(none)"
 
 

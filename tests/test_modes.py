@@ -6,7 +6,7 @@ import pytest
 from ai_runtime.errors import MCPToolError
 
 from ai_tutor.agent import parse_action
-from ai_tutor.models import TutorRequest
+from ai_tutor.models import ConversationMessage, TutorRequest
 from ai_tutor.ports import ModelReply
 from ai_tutor.service import TutorService
 
@@ -312,3 +312,32 @@ def test_call_budget_differs_by_mode():
 ])
 def test_parse_action(text, expected):
     assert parse_action(text) == expected
+
+
+def test_history_strips_citation_markers_from_assistant_replies_only():
+    model = FakeModel("Câu trả lời [1].")
+    ask(
+        TutorService(model, FakeTools(SEARCH)),
+        mode="vector",
+        history=[
+            ConversationMessage(role="user", content="Mục [1] nói gì?"),
+            ConversationMessage(role="assistant", content="Deadlock gồm 4 điều kiện [1, 2] và `arr[1]` trong code [3]."),
+        ],
+    )
+    prompt = model.prompts[0]
+    assert "user: Mục [1] nói gì?" in prompt
+    assert "assistant: Deadlock gồm 4 điều kiện và `arr[1]` trong code." in prompt
+
+
+def test_stream_emits_step_evidence_and_done_events():
+    model = FakeModel(tool("search_chunks", query="deadlock"), answer("Deadlock là … [1]."))
+    events = list(
+        TutorService(model, FakeTools(SEARCH)).stream(
+            TutorRequest(course_id=COURSE, message="Deadlock là gì?", mode="tools")
+        )
+    )
+    assert [e["event"] for e in events] == ["step", "step", "evidence", "done"]
+    assert events[1]["tool"] == "search_chunks"
+    assert events[2]["citations"][0]["chunk_id"] == "c1"
+    assert events[3]["response"]["answer"] == "Deadlock là … [1]."
+

@@ -1,7 +1,10 @@
+import json
+from collections.abc import Iterator
 from typing import Annotated
 
 from ai_runtime.errors import AIRuntimeError
 from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.responses import StreamingResponse
 
 from ai_tutor.container import get_tutor_service
 from ai_tutor.models import TutorRequest, TutorResponse
@@ -38,3 +41,28 @@ def answer_tutor_message(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="AI tutor dependency failed",
         ) from exc
+
+
+@app.post("/v1/tutor/messages/stream")
+def stream_tutor_message(
+    request: TutorRequest,
+    service: Annotated[TutorService, Depends(get_tutor_service)],
+) -> StreamingResponse:
+    def generate() -> Iterator[str]:
+        try:
+            for item in service.stream(request):
+                event = str(item.get("event", "message"))
+                yield f"event: {event}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+        except AIRuntimeError:
+            payload = {"event": "error", "detail": "AI tutor dependency failed"}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

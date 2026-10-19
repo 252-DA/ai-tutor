@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -77,7 +78,7 @@ def _call_key(tool: str, args: dict[str, Any]) -> str:
     return tool + json.dumps(args, sort_keys=True, ensure_ascii=False)
 
 
-def run_tool_loop(
+def iter_tool_loop(
     *,
     request: TutorRequest,
     model: TutorModel,
@@ -85,13 +86,12 @@ def run_tool_loop(
     book: EvidenceBook,
     trace: TutorTrace,
     max_tool_calls: int,
-) -> AgentResult:
+) -> Iterator[dict[str, Any] | AgentResult]:
     names = toolset_for(request.mode)
     system = prompts.tool_system_prompt(request.mode, max_tool_calls)
     scratchpad: list[str] = []
     seen_calls: set[str] = set()
     format_retries = 0
-    forced = False
 
     def ask(extra: str | None = None) -> str:
         prompt = prompts.tool_prompt(request, scratchpad)
@@ -105,6 +105,8 @@ def run_tool_loop(
 
     while True:
         out_of_calls = len(trace.tool_calls) >= max_tool_calls
+        if out_of_calls:
+            yield {"event": "step", "phase": "answering"}
         text = ask(prompts.FORCE_ANSWER if out_of_calls else None)
         trace.steps += 1
         action = parse_action(text)
@@ -112,7 +114,8 @@ def run_tool_loop(
         if action is None:
             if out_of_calls or format_retries >= MAX_FORMAT_RETRIES:
                 # Không còn cách bắt mô hình nói đúng định dạng: dùng nguyên văn làm câu trả lời.
-                return AgentResult(answer=text.strip(), forced=out_of_calls)
+                yield AgentResult(answer=text.strip(), forced=out_of_calls)
+                return
             format_retries += 1
             scratchpad.append(
                 "(Your previous reply was not a single valid JSON object. "
@@ -130,25 +133,29 @@ def run_tool_loop(
                     "or get_outline to check the course material before answering.)"
                 )
                 continue
-            return AgentResult(answer=str(action.get("answer", "")).strip(), forced=out_of_calls)
+            yield AgentResult(answer=str(action.get("answer", "")).strip(), forced=out_of_calls)
+            return
 
         if kind != "tool":
             if format_retries >= MAX_FORMAT_RETRIES:
-                return AgentResult(answer=text.strip(), forced=out_of_calls)
+                yield AgentResult(answer=text.strip(), forced=out_of_calls)
+                return
             format_retries += 1
             scratchpad.append('(Unknown "action". Use "tool" or "answer".)')
             continue
 
         if out_of_calls:
             # Đã nhắc ép trả lời mà vẫn đòi công cụ: lần sau không còn gì để đòi.
-            forced = True
             scratchpad.append("(No tool calls left; answer now.)")
+            yield {"event": "step", "phase": "answering"}
             text = ask(prompts.FORCE_ANSWER)
             trace.steps += 1
             final = parse_action(text)
             if final and "answer" in final:
-                return AgentResult(answer=str(final["answer"]).strip(), forced=True)
-            return AgentResult(answer=text.strip(), forced=True)
+                yield AgentResult(answer=str(final["answer"]).strip(), forced=True)
+                return
+            yield AgentResult(answer=text.strip(), forced=True)
+            return
 
         tool = str(action.get("tool", "")).strip()
         raw_args = action.get("args") or {}
@@ -180,6 +187,8 @@ def run_tool_loop(
             continue
         seen_calls.add(key)
 
+        yield {"event": "step", "phase": "searching", "tool": tool}
+        before_count = len(book)
         started = time.monotonic()
         try:
             result = tools.call(TOOLS[tool].mcp_name, mcp_args)
@@ -190,3 +199,30 @@ def run_tool_loop(
             observation, found = f"error — {str(exc)[:200]}", 0
         call.ms = int((time.monotonic() - started) * 1000)
         scratchpad.append(f"{header}\nResult:\n{observation}")
+        if len(book) > before_count:
+            yield {
+                "event": "evidence",
+                "citations": [c.model_dump() for c in book.all_citations()],
+            }
+
+
+def run_tool_loop(
+    *,
+    request: TutorRequest,
+    model: TutorModel,
+    tools: CourseTools,
+    book: EvidenceBook,
+    trace: TutorTrace,
+    max_tool_calls: int,
+) -> AgentResult:
+    for item in iter_tool_loop(
+        request=request,
+        model=model,
+        tools=tools,
+        book=book,
+        trace=trace,
+        max_tool_calls=max_tool_calls,
+    ):
+        if isinstance(item, AgentResult):
+            return item
+    return AgentResult(answer="", forced=True)
