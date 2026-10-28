@@ -2,11 +2,13 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
+from ai_runtime.errors import ModelGenerationError
+
 from ai_tutor import prompts
 from ai_tutor.agent import AgentResult, iter_tool_loop, run_tool_loop
 from ai_tutor.evidence import EvidenceBook
 from ai_tutor.models import ToolCallTrace, TutorRequest, TutorResponse, TutorTrace
-from ai_tutor.ports import CourseTools, TutorModel
+from ai_tutor.ports import CourseTools, ModelReply, TutorModel, stream_reply
 from ai_tutor.tools import add_chunks
 
 
@@ -79,7 +81,14 @@ class TutorService:
                     "citations": [c.model_dump() for c in book.all_citations()],
                 }
             yield {"event": "step", "phase": "answering"}
-            reply = self._model.generate(prompts.vector_prompt(request, book), prompts.SYSTEM_VECTOR)
+            reply: ModelReply | None = None
+            for item in stream_reply(self._model, prompts.vector_prompt(request, book), prompts.SYSTEM_VECTOR):
+                if isinstance(item, ModelReply):
+                    reply = item
+                elif item:
+                    yield {"event": "delta", "text": item}
+            if reply is None:
+                raise ModelGenerationError("Tutor model stream ended without a final reply")
             trace.steps = 1
             trace.llm_calls = 1
             trace.input_tokens = reply.input_tokens
@@ -94,6 +103,7 @@ class TutorService:
                 book=book,
                 trace=trace,
                 max_tool_calls=self._max_calls[request.mode],
+                stream_answer=True,
             ):
                 if isinstance(item, AgentResult):
                     answer, trace.forced_answer = item.answer, item.forced

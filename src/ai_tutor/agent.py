@@ -10,16 +10,17 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from typing import Any
 
 from ai_runtime.errors import MCPToolError
 
 from ai_tutor import prompts
+from ai_tutor.answer_stream import AnswerStream
 from ai_tutor.evidence import EvidenceBook
 from ai_tutor.models import ToolCallTrace, TutorRequest, TutorTrace
-from ai_tutor.ports import CourseTools, TutorModel
+from ai_tutor.ports import CourseTools, ModelReply, TutorModel, stream_reply
 from ai_tutor.tools import (
     TOOLS,
     ToolArgumentError,
@@ -86,28 +87,63 @@ def iter_tool_loop(
     book: EvidenceBook,
     trace: TutorTrace,
     max_tool_calls: int,
+    stream_answer: bool = False,
 ) -> Iterator[dict[str, Any] | AgentResult]:
+    """
+    stream_answer: phát {"event": "delta"} khi mô hình đang viết câu trả lời (luồng SSE).
+    Nếu lượt đó rốt cuộc không được nhận làm câu trả lời (JSON hỏng, chưa gọi công cụ…)
+    thì phát {"event": "reset"} để giao diện xóa phần chữ đã hiện.
+    """
     names = toolset_for(request.mode)
     system = prompts.tool_system_prompt(request.mode, max_tool_calls)
     scratchpad: list[str] = []
     seen_calls: set[str] = set()
     format_retries = 0
+    streamed = False
 
-    def ask(extra: str | None = None) -> str:
+    def ask(extra: str | None = None, *, live: bool = False) -> Generator[dict[str, Any], None, str]:
+        nonlocal streamed
         prompt = prompts.tool_prompt(request, scratchpad)
         if extra:
             prompt += f"\n\n{extra}"
-        reply = model.generate(prompt, system)
+        if live:
+            extractor = AnswerStream()
+            reply: ModelReply | None = None
+            for item in stream_reply(model, prompt, system):
+                if isinstance(item, ModelReply):
+                    reply = item
+                    continue
+                piece = extractor.feed(item)
+                if piece:
+                    if not streamed:
+                        yield {"event": "step", "phase": "answering"}
+                        streamed = True
+                    yield {"event": "delta", "text": piece}
+            if reply is None:
+                reply = ModelReply(text=extractor.text)
+        else:
+            reply = model.generate(prompt, system)
         trace.llm_calls += 1
         trace.input_tokens += reply.input_tokens
         trace.output_tokens += reply.output_tokens
         return reply.text
 
+    def would_accept_answer(out_of_calls: bool) -> bool:
+        # Cùng điều kiện nhận câu trả lời ở dưới: chỉ cho chữ chạy khi lượt này sẽ được dùng.
+        return bool(trace.tool_calls) or out_of_calls or format_retries >= MAX_FORMAT_RETRIES
+
     while True:
+        if streamed:
+            # Lượt trước đã cho chữ chạy nhưng không thành câu trả lời.
+            streamed = False
+            yield {"event": "reset"}
         out_of_calls = len(trace.tool_calls) >= max_tool_calls
         if out_of_calls:
             yield {"event": "step", "phase": "answering"}
-        text = ask(prompts.FORCE_ANSWER if out_of_calls else None)
+        text = yield from ask(
+            prompts.FORCE_ANSWER if out_of_calls else None,
+            live=stream_answer and would_accept_answer(out_of_calls),
+        )
         trace.steps += 1
         action = parse_action(text)
 
@@ -147,8 +183,11 @@ def iter_tool_loop(
         if out_of_calls:
             # Đã nhắc ép trả lời mà vẫn đòi công cụ: lần sau không còn gì để đòi.
             scratchpad.append("(No tool calls left; answer now.)")
+            if streamed:
+                streamed = False
+                yield {"event": "reset"}
             yield {"event": "step", "phase": "answering"}
-            text = ask(prompts.FORCE_ANSWER)
+            text = yield from ask(prompts.FORCE_ANSWER, live=stream_answer)
             trace.steps += 1
             final = parse_action(text)
             if final and "answer" in final:

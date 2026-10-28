@@ -336,8 +336,85 @@ def test_stream_emits_step_evidence_and_done_events():
             TutorRequest(course_id=COURSE, message="Deadlock là gì?", mode="tools")
         )
     )
-    assert [e["event"] for e in events] == ["step", "step", "evidence", "done"]
+    assert [e["event"] for e in events] == ["step", "step", "evidence", "step", "delta", "done"]
     assert events[1]["tool"] == "search_chunks"
     assert events[2]["citations"][0]["chunk_id"] == "c1"
-    assert events[3]["response"]["answer"] == "Deadlock là … [1]."
+    assert events[3]["phase"] == "answering"
+    assert events[5]["response"]["answer"] == "Deadlock là … [1]."
+
+
+# ----------------------------------------------------------------- streaming thật
+
+class StreamingFakeModel(FakeModel):
+    """Như FakeModel nhưng nhả câu trả lời từng vài ký tự, như provider thật."""
+
+    def __init__(self, *replies: str, piece: int = 3) -> None:
+        super().__init__(*replies)
+        self.piece = piece
+        self.streamed_calls = 0
+
+    def stream(self, prompt: str, system: str):
+        self.streamed_calls += 1
+        reply = self.generate(prompt, system)
+        for i in range(0, len(reply.text), self.piece):
+            yield reply.text[i : i + self.piece]
+        yield reply
+
+
+def stream_events(service, mode, message="Deadlock là gì?"):
+    return list(service.stream(TutorRequest(course_id=COURSE, message=message, mode=mode)))
+
+
+def deltas(events) -> str:
+    return "".join(e["text"] for e in events if e["event"] == "delta")
+
+
+def test_vector_stream_sends_the_answer_piece_by_piece():
+    model = StreamingFakeModel("Deadlock là chờ vòng tròn [1].")
+    events = stream_events(TutorService(model, FakeTools(SEARCH)), "vector")
+
+    assert sum(e["event"] == "delta" for e in events) > 1
+    assert deltas(events) == "Deadlock là chờ vòng tròn [1]."
+    assert events[-1]["event"] == "done"
+    assert events[-1]["response"]["citations"][0]["chunk_id"] == "c1"
+
+
+def test_tool_stream_sends_only_the_decoded_answer_not_the_json():
+    text = 'Deadlock là "chờ vòng" [1].\nHai dòng.'
+    model = StreamingFakeModel(tool("search_chunks", query="deadlock"), answer(text))
+    events = stream_events(TutorService(model, FakeTools(SEARCH)), "tools")
+
+    assert deltas(events) == text
+    assert events[-1]["response"]["answer"] == text
+    # Lượt gọi công cụ đầu tiên chưa được nhận làm câu trả lời nên không chạy theo luồng.
+    assert model.streamed_calls == 1
+
+
+def test_premature_answer_before_any_tool_is_never_streamed():
+    model = StreamingFakeModel(answer("Tự bịa"), tool("search_chunks", query="deadlock"), answer("Đúng [1]."))
+    events = stream_events(TutorService(model, FakeTools(SEARCH)), "tools")
+
+    assert "Tự bịa" not in deltas(events)
+    assert deltas(events) == "Đúng [1]."
+    assert all(e["event"] != "reset" for e in events)
+
+
+def test_a_streamed_answer_that_turns_out_broken_is_reset():
+    broken = '{"action": "answer", "answer": "nửa câu'  # JSON đứt giữa chừng
+    model = StreamingFakeModel(tool("search_chunks", query="deadlock"), broken, answer("Câu đầy đủ [1]."))
+    events = stream_events(TutorService(model, FakeTools(SEARCH)), "tools")
+    names = [e["event"] for e in events]
+
+    reset_at = names.index("reset")
+    before = "".join(e["text"] for e in events[:reset_at] if e["event"] == "delta")
+    after = "".join(e["text"] for e in events[reset_at:] if e["event"] == "delta")
+    assert before == "nửa câu"
+    assert after == "Câu đầy đủ [1]."
+    assert events[-1]["response"]["answer"] == "Câu đầy đủ [1]."
+
+
+def test_non_stream_endpoint_does_not_use_streaming():
+    model = StreamingFakeModel(tool("search_chunks", query="deadlock"), answer("ok [1]"))
+    ask(TutorService(model, FakeTools(SEARCH)), mode="tools")
+    assert model.streamed_calls == 0
 
