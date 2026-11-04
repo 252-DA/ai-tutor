@@ -73,3 +73,21 @@ def test_stream_endpoint_emits_sse_frames():
     assert "event: step" in response.text
     assert "event: done" in response.text
 
+
+
+class _CrashingTutor:
+    def stream(self, request):
+        yield {"event": "step", "phase": "searching"}
+        raise AttributeError("'NoneType' object has no attribute 'x'")
+
+
+def test_stream_ends_with_an_error_event_on_any_exception(caplog):
+    app.dependency_overrides[get_tutor_service] = lambda: _CrashingTutor()
+    try:
+        response = TestClient(app).post("/v1/tutor/messages/stream", json={"course_id": "CS101", "message": "hi"})
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert "event: step" in response.text
+    assert response.text.rstrip().endswith('data: {"event": "error", "detail": "AI tutor dependency failed"}')
+    assert "AI tutor stream failed" in caplog.text

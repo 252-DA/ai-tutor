@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Literal
 
 from ai_tutor.models import TutorCitation
 
@@ -44,6 +45,7 @@ class EvidenceItem:
     text: str
     quote: str | None = None
     document_name: str | None = None
+    kind: Literal["chunk", "outline"] = "chunk"
 
     def to_citation(self) -> TutorCitation:
         return TutorCitation(
@@ -53,6 +55,7 @@ class EvidenceItem:
             heading_path=self.heading_path,
             page_number=self.page_number,
             quote=self.quote,
+            kind=self.kind,
         )
 
 
@@ -75,6 +78,7 @@ class EvidenceBook:
         text: str,
         quote: str | None = None,
         document_name: str | None = None,
+        kind: Literal["chunk", "outline"] = "chunk",
     ) -> EvidenceItem | None:
         """Thêm một đoạn; cùng ``chunk_id`` thì dùng lại số cũ. None khi sổ đầy."""
         existing = self._by_chunk.get(chunk_id)
@@ -95,6 +99,7 @@ class EvidenceBook:
             text=text,
             quote=quote,
             document_name=document_name,
+            kind=kind,
         )
         self._items.append(item)
         self._by_chunk[chunk_id] = item

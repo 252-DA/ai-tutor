@@ -31,6 +31,8 @@ class TutorCitation(BaseModel):
     heading_path: list[str] = Field(default_factory=list)
     page_number: int | None = None
     quote: str | None = None
+    # chunk: đoạn tài liệu; outline: sự kiện lấy từ đề cương môn học (không có tài liệu để mở).
+    kind: Literal["chunk", "outline"] = "chunk"
 
 
 class ToolCallTrace(BaseModel):

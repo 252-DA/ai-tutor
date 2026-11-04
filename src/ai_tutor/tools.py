@@ -14,6 +14,8 @@ from ai_tutor.evidence import EvidenceBook
 
 OBSERVATION_CHARS = 6000
 CHUNK_PREVIEW_CHARS = 900
+OUTLINE_QUOTE_CHARS = 1500
+OUTLINE_LABEL = "Đề cương môn học"
 
 
 @dataclass(frozen=True)
@@ -124,6 +126,7 @@ def build_mcp_call(
             item = book.get(evidence)
             if item is None:
                 raise ToolArgumentError(f"there is no evidence [{evidence}]")
+            _reject_outline(item)
             if item.page_number is None:
                 raise ToolArgumentError(f"evidence [{evidence}] has no page number")
             return {
@@ -159,6 +162,7 @@ def build_mcp_call(
         item = book.get(evidence)
         if item is None:
             raise ToolArgumentError(f"there is no evidence [{evidence}]")
+        _reject_outline(item)
         return {
             "chunk_id": item.chunk_id,
             "window": _int(raw, "window", default=1, low=1, high=3),
@@ -177,6 +181,14 @@ def build_mcp_call(
 
 def _fail(message: str):
     raise ToolArgumentError(message)
+
+
+def _reject_outline(item) -> None:
+    # Số của đề cương không phải đoạn tài liệu: không có trang, không có chunk_id thật để gửi MCP.
+    if item.kind == "outline":
+        raise ToolArgumentError(
+            f"evidence [{item.index}] is the course outline, not a document chunk"
+        )
 
 
 def _clip(text: str, limit: int) -> str:
@@ -214,8 +226,18 @@ def add_chunks(book: EvidenceBook, rows: list[dict], *, name_key: str | None = N
     return items
 
 
-def format_observation(tool: str, result: dict[str, Any], book: EvidenceBook) -> tuple[str, int]:
-    """(văn bản đưa lại cho mô hình, số kết quả). Bằng chứng mới được ghi vào sổ."""
+def format_observation(
+    tool: str,
+    result: dict[str, Any],
+    book: EvidenceBook,
+    *,
+    chapter_code: str | None = None,
+) -> tuple[str, int]:
+    """
+    (văn bản đưa lại cho mô hình, số kết quả). Bằng chứng mới được ghi vào sổ.
+
+    chapter_code: chương mà get_outline đã lọc (kết quả MCP không nhắc lại), dùng đặt tên bằng chứng.
+    """
     if tool == "search_chunks":
         items = add_chunks(book, result.get("results") or [], name_key="document_name")
         text = "\n\n".join(chunk_line(i) for i in items) or "No matching chunks."
@@ -245,7 +267,22 @@ def format_observation(tool: str, result: dict[str, Any], book: EvidenceBook) ->
             lines.append(f"- {lo.get('code')} [{lo.get('bloom_level') or '?'}]: {lo.get('statement')}")
         for a in result.get("assessments") or []:
             lines.append(f"- Assessment {a.get('code')}: {a.get('name')} ({a.get('category')}, weight {a.get('weight')})")
-        return _limit("\n".join(lines)), len(result.get("chapters") or [])
+        outline = "\n".join(lines)
+        found = len(result.get("chapters") or [])
+        # Một bằng chứng cho cả lần gọi để mô hình trích [n] được khi nêu sự kiện từ đề cương.
+        item = book.add(
+            chunk_id=f"outline:{chapter_code or 'all'}",
+            document_id="",
+            heading_path=[OUTLINE_LABEL, f"Chương {chapter_code}"] if chapter_code else [OUTLINE_LABEL],
+            page_number=None,
+            text=outline,
+            # Giữ xuống dòng để khung trích dẫn hiển thị từng mục.
+            quote=outline if len(outline) <= OUTLINE_QUOTE_CHARS else outline[:OUTLINE_QUOTE_CHARS].rstrip() + "…",
+            kind="outline",
+        )
+        if item is None:
+            return _limit(outline), found
+        return _limit(f"[{item.index}] (Course outline)\n{outline}"), found
 
     if tool == "get_relations":
         relations = result.get("relations") or []

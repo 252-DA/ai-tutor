@@ -50,7 +50,8 @@ def parse_action(text: str) -> dict[str, Any] | None:
     fenced = re.search(r"```(?:json)?\s*(.*?)```", raw, flags=re.DOTALL)
     if fenced:
         raw = fenced.group(1).strip()
-    decoder = json.JSONDecoder()
+    # strict=False: chấp nhận xuống dòng/tab thật nằm trong chuỗi (mô hình hay viết vậy trong "answer").
+    decoder = json.JSONDecoder(strict=False)
     start = raw.find("{")
     while start != -1:
         try:
@@ -62,6 +63,13 @@ def parse_action(text: str) -> dict[str, Any] | None:
             return value
         start = raw.find("{", start + 1)
     return None
+
+
+def _salvage_answer(text: str) -> str:
+    """JSON hỏng thì vẫn lấy được phần "answer" đã viết; không có thì dùng nguyên văn."""
+    stream = AnswerStream()
+    stream.feed(text or "")
+    return stream.text if stream.text else (text or "").strip()
 
 
 def _normalize(action: dict[str, Any]) -> dict[str, Any]:
@@ -150,7 +158,7 @@ def iter_tool_loop(
         if action is None:
             if out_of_calls or format_retries >= MAX_FORMAT_RETRIES:
                 # Không còn cách bắt mô hình nói đúng định dạng: dùng nguyên văn làm câu trả lời.
-                yield AgentResult(answer=text.strip(), forced=out_of_calls)
+                yield AgentResult(answer=_salvage_answer(text), forced=out_of_calls)
                 return
             format_retries += 1
             scratchpad.append(
@@ -174,7 +182,7 @@ def iter_tool_loop(
 
         if kind != "tool":
             if format_retries >= MAX_FORMAT_RETRIES:
-                yield AgentResult(answer=text.strip(), forced=out_of_calls)
+                yield AgentResult(answer=_salvage_answer(text), forced=out_of_calls)
                 return
             format_retries += 1
             scratchpad.append('(Unknown "action". Use "tool" or "answer".)')
@@ -193,7 +201,7 @@ def iter_tool_loop(
             if final and "answer" in final:
                 yield AgentResult(answer=str(final["answer"]).strip(), forced=True)
                 return
-            yield AgentResult(answer=text.strip(), forced=True)
+            yield AgentResult(answer=_salvage_answer(text), forced=True)
             return
 
         tool = str(action.get("tool", "")).strip()
@@ -231,7 +239,9 @@ def iter_tool_loop(
         started = time.monotonic()
         try:
             result = tools.call(TOOLS[tool].mcp_name, mcp_args)
-            observation, found = format_observation(tool, result, book)
+            observation, found = format_observation(
+                tool, result, book, chapter_code=mcp_args.get("chapter_code")
+            )
             call.found = found
         except MCPToolError as exc:
             call.ok, call.error = False, str(exc)[:200]

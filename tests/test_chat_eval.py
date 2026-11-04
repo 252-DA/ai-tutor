@@ -153,3 +153,9 @@ def test_sheet_csv_roundtrip(tmp_path):
     with path.open(encoding="utf-8-sig", newline="") as handle:
         read = list(csv.DictReader(handle))
     assert read[0]["question"] == "hỏi" and read[0]["correct"] == ""
+
+
+def test_format_citations_handles_outline_citations():
+    outline = {"index": 2, "chunk_id": "outline:all", "document_id": "", "heading_path": ["Đề cương môn học"],
+               "page_number": None, "quote": "Course X\n- Chapter 1: A", "kind": "outline"}
+    assert chat_eval.format_citations([outline]) == "[2] Đề cương môn học: Course X - Chapter 1: A"

@@ -5,10 +5,12 @@ from typing import Any
 import pytest
 from ai_runtime.errors import MCPToolError
 
-from ai_tutor.agent import parse_action
+from ai_tutor.agent import _salvage_answer, parse_action
+from ai_tutor.evidence import EvidenceBook
 from ai_tutor.models import ConversationMessage, TutorRequest
 from ai_tutor.ports import ModelReply
 from ai_tutor.service import TutorService
+from ai_tutor.tools import OUTLINE_QUOTE_CHARS, format_observation
 
 COURSE = "co3137-uuid"
 
@@ -164,6 +166,60 @@ def test_outline_observation_lists_chapters_and_los():
     assert "Chapter 5: Streaming — Kafka (LO: L.O.2.2)" in model.prompts[1]
 
 
+OUTLINE = {"course": {"code": "CO3137", "title": "Dữ liệu lớn"},
+           "chapters": [{"code": "5", "title": "Streaming", "topics": "Kafka", "los": ["L.O.2.2"]}],
+           "learning_outcomes": [{"code": "L.O.2.2", "statement": "So sánh", "bloom_level": "analyze"}],
+           "assessments": []}
+
+
+def test_outline_becomes_one_citable_evidence_item():
+    model = FakeModel(tool("get_outline"), answer("Chương 5 đạt L.O.2.2 [1]."))
+    response = ask(TutorService(model, FakeTools({"get_course_outline": OUTLINE})), mode="tools")
+
+    assert "[1] (Course outline)\nCourse CO3137: Dữ liệu lớn" in model.prompts[1]
+    assert response.citations[0].model_dump() == {
+        "index": 1, "chunk_id": "outline:all", "document_id": "", "heading_path": ["Đề cương môn học"],
+        "page_number": None, "kind": "outline", "quote": response.citations[0].quote,
+    }
+    assert "Chapter 5: Streaming — Kafka (LO: L.O.2.2)" in response.citations[0].quote
+
+
+def test_outline_numbers_share_the_book_with_chunks_and_filtered_outline_names_the_chapter():
+    model = FakeModel(tool("search_chunks", query="x"), tool("get_outline", chapter_code="5"),
+                      answer("Theo tài liệu [1] và đề cương [3]."))
+    tools = FakeTools({**SEARCH, "get_course_outline": OUTLINE})
+    response = ask(TutorService(model, tools), mode="tools")
+
+    assert tools.calls[1] == ("get_course_outline", {"course_id": COURSE, "chapter_code": "5"})
+    assert "[3] (Course outline)" in model.prompts[2]
+    assert [(c.index, c.kind) for c in response.citations] == [(1, "chunk"), (3, "outline")]
+    assert response.citations[1].chunk_id == "outline:5"
+    assert response.citations[1].heading_path == ["Đề cương môn học", "Chương 5"]
+
+
+def test_long_outline_quote_is_clipped_and_full_book_returns_text_without_number():
+    big = {**OUTLINE, "assessments": [{"code": f"A{i}", "name": "x" * 40, "category": "k", "weight": 1} for i in range(60)]}
+    book = EvidenceBook()
+    text, _ = format_observation("get_outline", big, book)
+    assert text.startswith("[1] (Course outline)")
+    assert len(book.get(1).quote) <= OUTLINE_QUOTE_CHARS + 1
+
+    full = EvidenceBook(max_items=0)
+    text, _ = format_observation("get_outline", OUTLINE, full)
+    assert text.startswith("Course CO3137") and len(full) == 0
+
+
+@pytest.mark.parametrize("call", [tool("get_neighbors", evidence=1), tool("get_page", evidence=1)])
+def test_outline_evidence_cannot_be_used_as_a_document_chunk(call):
+    model = FakeModel(tool("get_outline"), call, answer("ok"))
+    tools = FakeTools({"get_course_outline": OUTLINE})
+    response = ask(TutorService(model, tools), mode="tools")
+
+    assert [name for name, _ in tools.calls] == ["get_course_outline"]   # không gửi outline:… tới MCP
+    assert response.trace.tool_calls[1].ok is False
+    assert "evidence [1] is the course outline, not a document chunk" in model.prompts[2]
+
+
 def test_unknown_tool_and_bad_args_are_reported_back_not_raised():
     model = FakeModel(
         tool("drop_database"),
@@ -224,6 +280,34 @@ def test_invalid_json_is_retried_then_used_as_the_answer():
     assert response.answer == "lần ba cũng không"
     assert response.trace.llm_calls == 3
     assert "not a single valid JSON" in model.prompts[1]
+
+
+def test_literal_newline_inside_the_answer_string_is_accepted():
+    raw = '{"action": "answer", "answer": "Dòng 1\nDòng 2\t[1]"}'
+    assert parse_action(raw) == {"action": "answer", "answer": "Dòng 1\nDòng 2\t[1]"}
+    model = FakeModel(tool("search_chunks", query="x"), raw)
+    response = ask(TutorService(model, FakeTools(SEARCH)), mode="tools")
+    assert response.answer == "Dòng 1\nDòng 2\t[1]"
+    assert response.trace.llm_calls == 2          # không bị bắt gửi lại
+
+
+def test_salvage_answer_prefers_the_answer_field_of_broken_json():
+    assert _salvage_answer('{"action": "answer", "answer": "Trả lời \\"đúng\\" [1]", oops') == 'Trả lời "đúng" [1]'
+    assert _salvage_answer('{"action": "answer", "answer": "cụt giữa chừ') == "cụt giữa chừ"
+    assert _salvage_answer("  chữ thường không JSON \n") == "chữ thường không JSON"
+    assert _salvage_answer('{"action": "tool", "tool": "get_outline"') == '{"action": "tool", "tool": "get_outline"'
+
+
+def test_broken_json_never_shows_the_raw_blob_to_the_learner():
+    broken = '{"action": "answer", "answer": "Deadlock là chờ vòng [1]", "extra": '
+    model = FakeModel(tool("search_chunks", query="x"), tool("search_chunks", query="y"),
+                      tool("search_chunks", query="z"), broken)
+    response = ask(TutorService(model, FakeTools(SEARCH), max_tool_calls_tools=2), mode="tools")
+    assert response.trace.forced_answer is True
+    assert response.answer == "Deadlock là chờ vòng [1]"
+
+    retried = FakeModel(broken, broken, broken)
+    assert ask(TutorService(retried, FakeTools()), mode="tools").answer == "Deadlock là chờ vòng [1]"
 
 
 def test_json_in_a_code_fence_is_accepted():
