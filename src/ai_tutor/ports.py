@@ -1,6 +1,13 @@
-from typing import Protocol
+from collections.abc import Iterator
+from dataclasses import dataclass
+from typing import Any, Protocol
 
-from ai_runtime.mcp import QuizContext
+
+@dataclass(frozen=True)
+class ModelReply:
+    text: str
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class TutorModel(Protocol):
@@ -8,17 +15,29 @@ class TutorModel(Protocol):
     def model_id(self) -> str:
         ...
 
-    def answer(self, prompt: str, system: str) -> str:
+    def generate(self, prompt: str, system: str) -> ModelReply:
         ...
 
 
-class LearningContext(Protocol):
-    def retrieve(
-        self,
-        *,
-        course_id: str,
-        lo_code: str,
-        query: str,
-        top_k: int,
-    ) -> QuizContext:
+class StreamingTutorModel(TutorModel, Protocol):
+    def stream(self, prompt: str, system: str) -> Iterator[str | ModelReply]:
+        """Các mẩu chữ mới theo thứ tự, phần tử cuối là ModelReply (toàn văn và số token)."""
+        ...
+
+
+def stream_reply(model: TutorModel, prompt: str, system: str) -> Iterator[str | ModelReply]:
+    """Sinh theo luồng nếu mô hình hỗ trợ; nếu không thì sinh một lần, trả toàn văn thành một mẩu."""
+    stream = getattr(model, "stream", None)
+    if stream is None:
+        reply = model.generate(prompt, system)
+        yield reply.text
+        yield reply
+        return
+    yield from stream(prompt, system)
+
+
+class CourseTools(Protocol):
+    """Công cụ tra cứu khóa học (MCP). Tên là tên công cụ MCP, tham số đã được kiểm."""
+
+    def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         ...

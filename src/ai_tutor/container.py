@@ -3,10 +3,10 @@ from functools import lru_cache
 
 from ai_runtime import EnvConfigSource, ModelProfile, ModelRegistry
 from ai_runtime.catalog import PROFILES, TUTOR
-from ai_runtime.mcp import LearningContextClient, MCPToolClient
+from ai_runtime.mcp import MCPToolClient
 
 from ai_tutor.adapters.ai_runtime_model import AIRuntimeTutorModel
-from ai_tutor.adapters.learning_context import MCPLearningContext
+from ai_tutor.adapters.learning_context import MCPCourseTools
 from ai_tutor.config import Settings, get_settings
 from ai_tutor.service import TutorService
 
@@ -50,7 +50,7 @@ def build_model_registry(settings: Settings) -> ModelRegistry:
 
 def build_tutor_service(settings: Settings) -> TutorService:
     resolved = build_model_registry(settings).resolve(TUTOR)
-    context_client = LearningContextClient(
+    tools = MCPCourseTools(
         MCPToolClient(
             settings.learning_context.url,
             timeout_seconds=settings.learning_context.timeout_seconds,
@@ -58,7 +58,9 @@ def build_tutor_service(settings: Settings) -> TutorService:
     )
     return TutorService(
         model=AIRuntimeTutorModel(resolved.runtime()),
-        context=MCPLearningContext(context_client),
+        tools=tools,
+        max_tool_calls_tools=settings.tutor.max_tool_calls_tools,
+        max_tool_calls_graph=settings.tutor.max_tool_calls_graph,
     )
 
 
