@@ -1,8 +1,17 @@
 name: ci
 
+# Test repo này trên layout meta-repo: lấy da-platform nhánh dev làm nền
+# (đủ repo anh em + contracts), đặt commit đang test vào ai-tutor/, rồi chạy
+# scripts/ci/test-component.sh ai-tutor. Định nghĩa đầy đủ:
+# 252-DA/da-platform/.github/workflows/component.yaml.
+#
+# Không còn SHA repo anh em ghim cứng ở đây (nguyên nhân CI đỏ từ 09/2026).
+# PR cần sửa đồng thời repo khác thì CI ở đây đỏ cho tới khi repo kia vào dev;
+# kết quả chuẩn là CI của PR meta-repo bump gitlink cả hai.
+
 on:
   push:
-    branches: [master]
+    branches: [dev, master]
   pull_request:
   workflow_dispatch:
 
@@ -11,18 +20,6 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: ai-tutor
-      - uses: 252-DA/ai-sdk/.github/actions/materialize@d9b39ce3c90d9031e6ec459e6610000795b3d57f
-        with:
-          path: ai-sdk
-      - uses: astral-sh/setup-uv@v5
-      - name: Install dependencies
-        working-directory: ai-tutor
-        run: uv sync --frozen --python 3.10
-      - name: Run tests
-        working-directory: ai-tutor
-        run: uv run --frozen pytest -q
+    uses: 252-DA/da-platform/.github/workflows/component.yaml@dev
+    with:
+      component: ai-tutor
